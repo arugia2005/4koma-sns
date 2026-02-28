@@ -1,0 +1,100 @@
+@import "tailwindcss";
+
+@theme {
+  --color-bg: #0a0a0a;
+  --color-bg-card: #1a1a2e;
+  --color-bg-card-hover: #252542;
+  --color-bg-input: #16162a;
+  --color-border: #2a2a4a;
+  --color-text: #fafafa;
+  --color-text-muted: #8888aa;
+  --color-accent: #a855f7;
+  --color-accent-2: #ec4899;
+  --color-accent-glow: rgba(168, 85, 247, 0.3);
+  --color-success: #22c55e;
+  --color-danger: #ef4444;
+  --font-sans: "Noto Sans JP", system-ui, sans-serif;
+}
+
+@layer base {
+  body {
+    background-color: var(--color-bg);
+    color: var(--color-text);
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+  }
+}
+
+/* Gradient text utility */
+.gradient-text {
+  background: linear-gradient(135deg, var(--color-accent), var(--color-accent-2));
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+/* Gradient border card */
+.card-gradient {
+  position: relative;
+  background: var(--color-bg-card);
+  border-radius: 1rem;
+  overflow: hidden;
+}
+.card-gradient::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  padding: 1px;
+  border-radius: 1rem;
+  background: linear-gradient(135deg, var(--color-accent), var(--color-accent-2));
+  mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+  mask-composite: exclude;
+  -webkit-mask-composite: xor;
+  pointer-events: none;
+}
+
+/* Glow button */
+.btn-glow {
+  background: linear-gradient(135deg, var(--color-accent), var(--color-accent-2));
+  color: white;
+  font-weight: 700;
+  padding: 0.75rem 2rem;
+  border-radius: 9999px;
+  border: none;
+  cursor: pointer;
+  transition: all 0.2s;
+  box-shadow: 0 0 20px var(--color-accent-glow);
+}
+.btn-glow:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 0 30px var(--color-accent-glow), 0 4px 20px rgba(0, 0, 0, 0.3);
+}
+.btn-glow:active {
+  transform: translateY(0);
+}
+
+/* Secondary button */
+.btn-secondary {
+  background: var(--color-bg-card);
+  color: var(--color-text);
+  font-weight: 600;
+  padding: 0.625rem 1.5rem;
+  border-radius: 9999px;
+  border: 1px solid var(--color-border);
+  cursor: pointer;
+  transition: all 0.2s;
+}
+.btn-secondary:hover {
+  background: var(--color-bg-card-hover);
+  border-color: var(--color-accent);
+}
+
+/* Capture button pulse */
+@keyframes pulse-ring {
+  0% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.6); }
+  70% { box-shadow: 0 0 0 12px rgba(239, 68, 68, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0); }
+}
+.capture-btn {
+  animation: pulse-ring 2s infinite;
+}
