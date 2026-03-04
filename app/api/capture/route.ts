@@ -8,7 +8,6 @@ import ffmpegPath from "ffmpeg-static"
 
 const execFileAsync = promisify(execFile)
 
-// Vercel Pro なら30秒まで延長可能
 export const maxDuration = 30
 
 export async function POST(request: NextRequest) {
@@ -29,36 +28,79 @@ export async function POST(request: NextRequest) {
             )
         }
 
-        // youtubei.js で動画の直接 URL を取得（Innertube API 使用）
+        // youtubei.js で動画情報を取得
         const { Innertube } = await import("youtubei.js")
         const yt = await Innertube.create({
             generate_session_locally: true,
+            retrieve_player: true,
         })
 
-        const info = await yt.getBasicInfo(videoId)
-        const formats = info.streaming_data?.formats
-        const adaptiveFormats = info.streaming_data?.adaptive_formats
+        // getInfo で完全な情報を取得（getBasicInfo だとストリーミングデータが欠けることがある）
+        const info = await yt.getInfo(videoId)
 
-        // video+audio format を優先、なければ adaptive の video-only
-        let videoUrl: string | null = null
-
-        if (formats && formats.length > 0) {
-            const format = formats[0]
-            videoUrl = format.decipher(yt.session.player)
+        if (!info.streaming_data) {
+            return NextResponse.json(
+                { error: "ストリーミングデータを取得できませんでした" },
+                { status: 500 }
+            )
         }
 
-        if (!videoUrl && adaptiveFormats) {
-            const videoFormat = adaptiveFormats.find(
-                (f) => f.has_video && f.quality_label
-            )
-            if (videoFormat) {
-                videoUrl = videoFormat.decipher(yt.session.player)
+        // URL を取得: formats → adaptive_formats の順に試す
+        let videoUrl: string | null = null
+
+        // 1. 通常フォーマット（video+audio）を試す
+        const formats = info.streaming_data.formats
+        if (formats && formats.length > 0) {
+            for (const fmt of formats) {
+                try {
+                    // url が直接ある場合
+                    if (fmt.url) {
+                        videoUrl = fmt.url
+                        break
+                    }
+                    // decipher が必要な場合
+                    const deciphered = fmt.decipher(yt.session.player)
+                    if (deciphered) {
+                        videoUrl = deciphered
+                        break
+                    }
+                } catch {
+                    continue
+                }
+            }
+        }
+
+        // 2. アダプティブフォーマット（video-only）を試す
+        if (!videoUrl) {
+            const adaptive = info.streaming_data.adaptive_formats
+            if (adaptive && adaptive.length > 0) {
+                // video を含むフォーマットをフィルター
+                const videoFormats = adaptive.filter((f) => f.has_video)
+                for (const fmt of videoFormats) {
+                    try {
+                        if (fmt.url) {
+                            videoUrl = fmt.url
+                            break
+                        }
+                        const deciphered = fmt.decipher(yt.session.player)
+                        if (deciphered) {
+                            videoUrl = deciphered
+                            break
+                        }
+                    } catch {
+                        continue
+                    }
+                }
             }
         }
 
         if (!videoUrl) {
+            console.error("No video URL found. Formats:", JSON.stringify({
+                formatsCount: info.streaming_data.formats?.length ?? 0,
+                adaptiveCount: info.streaming_data.adaptive_formats?.length ?? 0,
+            }))
             return NextResponse.json(
-                { error: "動画の URL を取得できませんでした" },
+                { error: "動画の URL を取得できませんでした。この動画は制限されている可能性があります。" },
                 { status: 500 }
             )
         }
@@ -91,6 +133,13 @@ export async function POST(request: NextRequest) {
     } catch (error) {
         console.error("Frame capture error:", error)
         const message = error instanceof Error ? error.message : "Unknown error"
+
+        if (message.includes("Sign in") || message.includes("bot")) {
+            return NextResponse.json(
+                { error: "YouTubeのアクセス制限に引っかかりました。別の動画を試してみてください。" },
+                { status: 403 }
+            )
+        }
 
         return NextResponse.json(
             { error: `フレーム取得失敗: ${message}` },
