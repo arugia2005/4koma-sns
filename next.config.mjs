@@ -1,5 +1,5 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
-    serverExternalPackages: ["ffmpeg-static"],
+    serverExternalPackages: ["ffmpeg-static", "youtubei.js"],
 };
 export default nextConfig;
