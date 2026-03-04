@@ -10,6 +10,109 @@ const execFileAsync = promisify(execFile)
 
 export const maxDuration = 30
 
+// Piped / Invidious インスタンス（複数用意してフォールバック）
+const PIPED_INSTANCES = [
+    "https://pipedapi.kavin.rocks",
+    "https://pipedapi.adminforge.de",
+    "https://api.piped.projectsegfau.lt",
+]
+
+const INVIDIOUS_INSTANCES = [
+    "https://inv.tux.pizza",
+    "https://invidious.nerdvpn.de",
+    "https://vid.puffyan.us",
+]
+
+/**
+ * Piped API から動画の直接URLを取得
+ */
+async function getVideoUrlFromPiped(videoId: string): Promise<string | null> {
+    for (const instance of PIPED_INSTANCES) {
+        try {
+            const res = await fetch(`${instance}/streams/${videoId}`, {
+                signal: AbortSignal.timeout(8000),
+            })
+            if (!res.ok) continue
+
+            const data = await res.json()
+            // videoStreams から適切な品質を選択（720p > 480p > any）
+            const streams = data.videoStreams as Array<{
+                url: string
+                quality: string
+                mimeType: string
+                videoOnly: boolean
+            }> | undefined
+
+            if (!streams || streams.length === 0) continue
+
+            // video+audio を含むストリームを優先
+            const mixed = streams.filter((s) => !s.videoOnly)
+            if (mixed.length > 0) {
+                const preferred = mixed.find((s) => s.quality === "720p")
+                    ?? mixed.find((s) => s.quality === "480p")
+                    ?? mixed[0]
+                return preferred.url
+            }
+
+            // video-only でもOK
+            const preferred = streams.find((s) => s.quality === "720p")
+                ?? streams.find((s) => s.quality === "480p")
+                ?? streams[0]
+            return preferred.url
+        } catch {
+            continue
+        }
+    }
+    return null
+}
+
+/**
+ * Invidious API から動画の直接URLを取得（フォールバック）
+ */
+async function getVideoUrlFromInvidious(videoId: string): Promise<string | null> {
+    for (const instance of INVIDIOUS_INSTANCES) {
+        try {
+            const res = await fetch(`${instance}/api/v1/videos/${videoId}?fields=formatStreams,adaptiveFormats`, {
+                signal: AbortSignal.timeout(8000),
+            })
+            if (!res.ok) continue
+
+            const data = await res.json()
+
+            // formatStreams（video+audio）を優先
+            const formatStreams = data.formatStreams as Array<{
+                url: string
+                quality: string
+                type: string
+            }> | undefined
+
+            if (formatStreams && formatStreams.length > 0) {
+                const preferred = formatStreams.find((s) => s.quality === "720p")
+                    ?? formatStreams.find((s) => s.quality === "480p")
+                    ?? formatStreams[0]
+                return preferred.url
+            }
+
+            // adaptiveFormats（video-only）
+            const adaptive = data.adaptiveFormats as Array<{
+                url: string
+                type: string
+                qualityLabel: string
+            }> | undefined
+
+            if (adaptive && adaptive.length > 0) {
+                const videoFormats = adaptive.filter((f) => f.type?.startsWith("video/"))
+                if (videoFormats.length > 0) {
+                    return videoFormats[0].url
+                }
+            }
+        } catch {
+            continue
+        }
+    }
+    return null
+}
+
 export async function POST(request: NextRequest) {
     try {
         const { videoId, timestamp } = await request.json()
@@ -28,79 +131,16 @@ export async function POST(request: NextRequest) {
             )
         }
 
-        // youtubei.js で動画情報を取得
-        const { Innertube } = await import("youtubei.js")
-        const yt = await Innertube.create({
-            generate_session_locally: true,
-            retrieve_player: true,
-        })
+        // Piped API で動画URLを取得 → 失敗したら Invidious にフォールバック
+        let videoUrl = await getVideoUrlFromPiped(videoId)
 
-        // getInfo で完全な情報を取得（getBasicInfo だとストリーミングデータが欠けることがある）
-        const info = await yt.getInfo(videoId)
-
-        if (!info.streaming_data) {
-            return NextResponse.json(
-                { error: "ストリーミングデータを取得できませんでした" },
-                { status: 500 }
-            )
-        }
-
-        // URL を取得: formats → adaptive_formats の順に試す
-        let videoUrl: string | null = null
-
-        // 1. 通常フォーマット（video+audio）を試す
-        const formats = info.streaming_data.formats
-        if (formats && formats.length > 0) {
-            for (const fmt of formats) {
-                try {
-                    // url が直接ある場合
-                    if (fmt.url) {
-                        videoUrl = fmt.url
-                        break
-                    }
-                    // decipher が必要な場合
-                    const deciphered = fmt.decipher(yt.session.player)
-                    if (deciphered) {
-                        videoUrl = deciphered
-                        break
-                    }
-                } catch {
-                    continue
-                }
-            }
-        }
-
-        // 2. アダプティブフォーマット（video-only）を試す
         if (!videoUrl) {
-            const adaptive = info.streaming_data.adaptive_formats
-            if (adaptive && adaptive.length > 0) {
-                // video を含むフォーマットをフィルター
-                const videoFormats = adaptive.filter((f) => f.has_video)
-                for (const fmt of videoFormats) {
-                    try {
-                        if (fmt.url) {
-                            videoUrl = fmt.url
-                            break
-                        }
-                        const deciphered = fmt.decipher(yt.session.player)
-                        if (deciphered) {
-                            videoUrl = deciphered
-                            break
-                        }
-                    } catch {
-                        continue
-                    }
-                }
-            }
+            videoUrl = await getVideoUrlFromInvidious(videoId)
         }
 
         if (!videoUrl) {
-            console.error("No video URL found. Formats:", JSON.stringify({
-                formatsCount: info.streaming_data.formats?.length ?? 0,
-                adaptiveCount: info.streaming_data.adaptive_formats?.length ?? 0,
-            }))
             return NextResponse.json(
-                { error: "動画の URL を取得できませんでした。この動画は制限されている可能性があります。" },
+                { error: "動画の取得に失敗しました。別の動画を試してください。" },
                 { status: 500 }
             )
         }
@@ -133,13 +173,6 @@ export async function POST(request: NextRequest) {
     } catch (error) {
         console.error("Frame capture error:", error)
         const message = error instanceof Error ? error.message : "Unknown error"
-
-        if (message.includes("Sign in") || message.includes("bot")) {
-            return NextResponse.json(
-                { error: "YouTubeのアクセス制限に引っかかりました。別の動画を試してみてください。" },
-                { status: 403 }
-            )
-        }
 
         return NextResponse.json(
             { error: `フレーム取得失敗: ${message}` },
