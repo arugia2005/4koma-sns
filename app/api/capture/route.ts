@@ -10,55 +10,68 @@ const execFileAsync = promisify(execFile)
 
 export const maxDuration = 30
 
-// Piped / Invidious インスタンス（複数用意してフォールバック）
-const PIPED_INSTANCES = [
-    "https://pipedapi.kavin.rocks",
-    "https://pipedapi.adminforge.de",
-    "https://api.piped.projectsegfau.lt",
-]
-
-const INVIDIOUS_INSTANCES = [
-    "https://inv.tux.pizza",
-    "https://invidious.nerdvpn.de",
-    "https://vid.puffyan.us",
-]
-
 /**
- * Piped API から動画の直接URLを取得
+ * 方法1: YouTube Innertube API (Android クライアント偽装)
+ * YouTube内部APIに直接リクエスト。ライブラリ不要。
  */
-async function getVideoUrlFromPiped(videoId: string): Promise<string | null> {
-    for (const instance of PIPED_INSTANCES) {
+async function getUrlFromInnertube(videoId: string): Promise<string | null> {
+    const clients = [
+        {
+            name: "ANDROID",
+            version: "19.09.37",
+            ua: "com.google.android.youtube/19.09.37 (Linux; U; Android 14) gzip",
+            body: {
+                context: {
+                    client: { clientName: "ANDROID", clientVersion: "19.09.37", androidSdkVersion: 34 }
+                },
+                videoId,
+            }
+        },
+        {
+            name: "IOS",
+            version: "19.09.3",
+            ua: "com.google.ios.youtube/19.09.3 (iPhone16,2; U; CPU iOS 17_4 like Mac OS X;)",
+            body: {
+                context: {
+                    client: { clientName: "IOS", clientVersion: "19.09.3", deviceModel: "iPhone16,2" }
+                },
+                videoId,
+            }
+        },
+    ]
+
+    for (const client of clients) {
         try {
-            const res = await fetch(`${instance}/streams/${videoId}`, {
-                signal: AbortSignal.timeout(8000),
-            })
+            const res = await fetch(
+                "https://www.youtube.com/youtubei/v1/player?prettyPrint=false",
+                {
+                    method: "POST",
+                    headers: {
+                        "Content-Type": "application/json",
+                        "User-Agent": client.ua,
+                    },
+                    body: JSON.stringify(client.body),
+                    signal: AbortSignal.timeout(8000),
+                }
+            )
             if (!res.ok) continue
-
             const data = await res.json()
-            // videoStreams から適切な品質を選択（720p > 480p > any）
-            const streams = data.videoStreams as Array<{
-                url: string
-                quality: string
-                mimeType: string
-                videoOnly: boolean
-            }> | undefined
 
-            if (!streams || streams.length === 0) continue
-
-            // video+audio を含むストリームを優先
-            const mixed = streams.filter((s) => !s.videoOnly)
-            if (mixed.length > 0) {
-                const preferred = mixed.find((s) => s.quality === "720p")
-                    ?? mixed.find((s) => s.quality === "480p")
-                    ?? mixed[0]
-                return preferred.url
+            // formats（video+audio）を優先
+            const formats = data?.streamingData?.formats
+            if (formats?.length) {
+                const fmt = formats.find((f: { url?: string }) => f.url)
+                if (fmt?.url) return fmt.url
             }
 
-            // video-only でもOK
-            const preferred = streams.find((s) => s.quality === "720p")
-                ?? streams.find((s) => s.quality === "480p")
-                ?? streams[0]
-            return preferred.url
+            // adaptiveFormats（video-only）
+            const adaptive = data?.streamingData?.adaptiveFormats
+            if (adaptive?.length) {
+                const vid = adaptive.find(
+                    (f: { url?: string; mimeType?: string }) => f.url && f.mimeType?.startsWith("video/")
+                )
+                if (vid?.url) return vid.url
+            }
         } catch {
             continue
         }
@@ -67,44 +80,73 @@ async function getVideoUrlFromPiped(videoId: string): Promise<string | null> {
 }
 
 /**
- * Invidious API から動画の直接URLを取得（フォールバック）
+ * 方法2: Piped API (YouTube代替フロントエンドのAPI)
  */
-async function getVideoUrlFromInvidious(videoId: string): Promise<string | null> {
-    for (const instance of INVIDIOUS_INSTANCES) {
+async function getUrlFromPiped(videoId: string): Promise<string | null> {
+    const instances = [
+        "https://pipedapi.kavin.rocks",
+        "https://pipedapi.in.projectsegfau.lt",
+        "https://api.piped.privacydev.net",
+        "https://pipedapi.adminforge.de",
+    ]
+
+    for (const base of instances) {
         try {
-            const res = await fetch(`${instance}/api/v1/videos/${videoId}?fields=formatStreams,adaptiveFormats`, {
+            const res = await fetch(`${base}/streams/${videoId}`, {
                 signal: AbortSignal.timeout(8000),
             })
             if (!res.ok) continue
-
             const data = await res.json()
 
-            // formatStreams（video+audio）を優先
-            const formatStreams = data.formatStreams as Array<{
-                url: string
-                quality: string
-                type: string
+            // videoStreams
+            const streams = data.videoStreams as Array<{
+                url: string; quality: string; videoOnly: boolean
             }> | undefined
 
-            if (formatStreams && formatStreams.length > 0) {
-                const preferred = formatStreams.find((s) => s.quality === "720p")
-                    ?? formatStreams.find((s) => s.quality === "480p")
-                    ?? formatStreams[0]
-                return preferred.url
+            if (streams?.length) {
+                const mixed = streams.filter((s) => !s.videoOnly)
+                const pool = mixed.length > 0 ? mixed : streams
+                const pick = pool.find((s) => s.quality === "720p")
+                    ?? pool.find((s) => s.quality === "480p")
+                    ?? pool[0]
+                if (pick?.url) return pick.url
             }
+        } catch {
+            continue
+        }
+    }
+    return null
+}
 
-            // adaptiveFormats（video-only）
+/**
+ * 方法3: Invidious API
+ */
+async function getUrlFromInvidious(videoId: string): Promise<string | null> {
+    const instances = [
+        "https://invidious.fdn.fr",
+        "https://inv.nadeko.net",
+        "https://invidious.nerdvpn.de",
+        "https://inv.tux.pizza",
+    ]
+
+    for (const base of instances) {
+        try {
+            const res = await fetch(
+                `${base}/api/v1/videos/${videoId}?fields=formatStreams,adaptiveFormats`,
+                { signal: AbortSignal.timeout(8000) }
+            )
+            if (!res.ok) continue
+            const data = await res.json()
+
+            const fmts = data.formatStreams as Array<{ url: string }> | undefined
+            if (fmts?.length) return fmts[0].url
+
             const adaptive = data.adaptiveFormats as Array<{
-                url: string
-                type: string
-                qualityLabel: string
+                url: string; type: string
             }> | undefined
-
-            if (adaptive && adaptive.length > 0) {
-                const videoFormats = adaptive.filter((f) => f.type?.startsWith("video/"))
-                if (videoFormats.length > 0) {
-                    return videoFormats[0].url
-                }
+            if (adaptive?.length) {
+                const vid = adaptive.find((f) => f.type?.startsWith("video/"))
+                if (vid?.url) return vid.url
             }
         } catch {
             continue
@@ -118,46 +160,50 @@ export async function POST(request: NextRequest) {
         const { videoId, timestamp } = await request.json()
 
         if (!videoId || timestamp === undefined) {
-            return NextResponse.json(
-                { error: "videoId と timestamp を指定してください" },
-                { status: 400 }
-            )
+            return NextResponse.json({ error: "videoId と timestamp を指定してください" }, { status: 400 })
         }
 
         if (!ffmpegPath) {
+            return NextResponse.json({ error: "ffmpeg が利用できません" }, { status: 500 })
+        }
+
+        // 3つの方法を順番に試す
+        const methods = [
+            { name: "Innertube", fn: () => getUrlFromInnertube(videoId) },
+            { name: "Piped", fn: () => getUrlFromPiped(videoId) },
+            { name: "Invidious", fn: () => getUrlFromInvidious(videoId) },
+        ]
+
+        let videoUrl: string | null = null
+        const errors: string[] = []
+
+        for (const method of methods) {
+            try {
+                videoUrl = await method.fn()
+                if (videoUrl) {
+                    console.log(`Got video URL via ${method.name}`)
+                    break
+                }
+                errors.push(`${method.name}: URL not found`)
+            } catch (e) {
+                errors.push(`${method.name}: ${e instanceof Error ? e.message : "error"}`)
+            }
+        }
+
+        if (!videoUrl) {
+            console.error("All methods failed:", errors.join(", "))
             return NextResponse.json(
-                { error: "ffmpeg が利用できません" },
+                { error: `動画URL取得に全て失敗しました: ${errors.join("; ")}` },
                 { status: 500 }
             )
         }
 
-        // Piped API で動画URLを取得 → 失敗したら Invidious にフォールバック
-        let videoUrl = await getVideoUrlFromPiped(videoId)
-
-        if (!videoUrl) {
-            videoUrl = await getVideoUrlFromInvidious(videoId)
-        }
-
-        if (!videoUrl) {
-            return NextResponse.json(
-                { error: "動画の取得に失敗しました。別の動画を試してください。" },
-                { status: 500 }
-            )
-        }
-
-        // ffmpeg で指定秒数のフレームを抽出
+        // ffmpeg でフレーム抽出
         const outputPath = join(tmpdir(), `frame-${Date.now()}.jpg`)
 
         await execFileAsync(
             ffmpegPath,
-            [
-                "-ss", String(timestamp),
-                "-i", videoUrl,
-                "-frames:v", "1",
-                "-q:v", "2",
-                "-y",
-                outputPath,
-            ],
+            ["-ss", String(timestamp), "-i", videoUrl, "-frames:v", "1", "-q:v", "2", "-y", outputPath],
             { timeout: 25000 }
         )
 
@@ -165,18 +211,11 @@ export async function POST(request: NextRequest) {
         await unlink(outputPath).catch(() => { })
 
         return new NextResponse(frameBuffer, {
-            headers: {
-                "Content-Type": "image/jpeg",
-                "Cache-Control": "public, max-age=3600",
-            },
+            headers: { "Content-Type": "image/jpeg", "Cache-Control": "public, max-age=3600" },
         })
     } catch (error) {
         console.error("Frame capture error:", error)
-        const message = error instanceof Error ? error.message : "Unknown error"
-
-        return NextResponse.json(
-            { error: `フレーム取得失敗: ${message}` },
-            { status: 500 }
-        )
+        const msg = error instanceof Error ? error.message : "Unknown error"
+        return NextResponse.json({ error: `フレーム取得失敗: ${msg}` }, { status: 500 })
     }
 }
